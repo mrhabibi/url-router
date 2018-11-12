@@ -7,7 +7,7 @@ import android.util.Log
 import java.util.*
 import java.util.regex.Pattern
 
-typealias PreProcessor = (Result) -> String?
+typealias PreProcessor = (Result) -> Unit
 typealias Processor = (Result) -> Unit
 typealias GlobalInterceptor = (Interceptor, Processor, Result) -> Unit
 typealias Interceptor = (Processor, Result) -> Unit
@@ -49,9 +49,11 @@ class Router {
      *
      * @param expression Expression
      * @param processor  Invocation
+     * @param parentExpression  Scheme and host expression
      */
-    fun map(expression: String, processor: Processor) {
-        processors = processors.plus(Expression(expression, processor))
+    private fun pathMap(expression: String, processor: Processor, parentExpression: String? = null) {
+        assertExpression(expression)
+        processors = processors.plus(Expression(expression, processor, 1, parentExpression))
     }
 
     /**
@@ -59,45 +61,88 @@ class Router {
      *
      * @param expressions Expressions
      * @param processor   Invocation
+     * @param parentExpression  Scheme and host expression
      */
-    fun map(expressions: List<String>, processor: Processor) {
-        processors = processors.plus(expressions.map { Expression(it, processor) })
+    private fun pathMap(expressions: List<String>, processor: Processor, parentExpression: String? = null) {
+        assertExpression(expressions)
+        processors = processors.plus(expressions.map { Expression(it, processor, expressions.size, parentExpression) })
     }
 
     /**
-     * Scheme and host processor for single expression in single processor
      *
-     * @param expression Expression
-     * @param preProcessor  Invocation
      */
-    fun preMap(expression: String, preProcessor: PreProcessor) {
-        preProcessors = preProcessors.plus(Expression(expression, preProcessor))
-    }
+    fun map(routeMapBuilder: RouterMap.Builder) {
+        val routerMap = routeMapBuilder.build()
 
-    /**
-     * Schemes and host processor for multiple expressions with prefixes and postfixes in single processor
-     *
-     * @param prefixes    Prefixes
-     * @param expressions Expressions
-     * @param postfixes   Postfixes
-     * @param processor   Processor
-     */
-    fun preMap(prefixes: List<String> = emptyList(),
-               expressions: List<String>,
-               postfixes: List<String> = emptyList(),
-               processor: PreProcessor) {
+        assertExpression(routerMap.expressions)
+        val count = if (routerMap.prefixes.isEmpty()) 1 else routerMap.prefixes.size *
+                routerMap.expressions.size *
+                if (routerMap.postfixes.isEmpty()) 1 else routerMap.postfixes.size
 
+        val pattern = mutableListOf<String>()
+        val prefixes = if (!routerMap.prefixes.isEmpty()) routerMap.prefixes else listOf("")
+        val postfixes = if (!routerMap.postfixes.isEmpty()) routerMap.postfixes else listOf("")
         prefixes.forEach { prefix ->
-            expressions.forEach { expression ->
+            routerMap.expressions.forEach { expression ->
                 postfixes.forEach { postfix ->
+                    pattern.add(prefix.nullToEmpty() + expression + postfix.nullToEmpty())
                     preProcessors = preProcessors.plus(Expression(
                             prefix.nullToEmpty() +
                                     expression +
                                     postfix.nullToEmpty(),
-                            processor))
+                            routerMap.preProcessor, count))
                 }
             }
         }
+        pattern.forEach { pattern ->
+            routerMap.path.forEach {
+                pathMap(it.expression, it.processor, pattern)
+            }
+        }
+    }
+
+    /**
+     *
+     */
+    fun map(routeMapBuilder: RouterMap.Builder.() -> Unit) {
+        val builder = RouterMap.Builder()
+        builder.routeMapBuilder()
+        val routerMap = builder.build()
+
+        assertExpression(routerMap.expressions)
+        val count = if (routerMap.prefixes.isEmpty()) 1 else routerMap.prefixes.size *
+                routerMap.expressions.size *
+                if (routerMap.postfixes.isEmpty()) 1 else routerMap.postfixes.size
+
+        val pattern = mutableListOf<String>()
+        val prefixes = if (!routerMap.prefixes.isEmpty()) routerMap.prefixes else listOf("")
+        val postfixes = if (!routerMap.postfixes.isEmpty()) routerMap.postfixes else listOf("")
+        prefixes.forEach { prefix ->
+            routerMap.expressions.forEach { expression ->
+                postfixes.forEach { postfix ->
+                    pattern.add(prefix.nullToEmpty() + expression + postfix.nullToEmpty())
+                    preProcessors = preProcessors.plus(Expression(
+                            prefix.nullToEmpty() +
+                                    expression +
+                                    postfix.nullToEmpty(),
+                            routerMap.preProcessor, count))
+                }
+            }
+        }
+        pattern.forEach { pattern ->
+            routerMap.path.forEach {
+                pathMap(it.expression, it.processor, pattern)
+            }
+        }
+    }
+
+    private fun assertExpression(expression: String) {
+        assertExpression(listOf(expression))
+    }
+
+    private fun assertExpression(expressions: List<String>) {
+        if (expressions.isEmpty()) throw IllegalArgumentException("List of expressions is empty")
+        if (expressions.any { it.isBlank() }) throw IllegalArgumentException("One of expression is blank")
     }
 
     /**
@@ -130,11 +175,13 @@ class Router {
 
                 if (match) {
                     val result = rawResult.cook(context, url, args)
-                    val processedUrl = it.processor.invoke(result)
+                    it.processor.invoke(result)
+
+                    val processedUrl = Uri.parse(getUrlWithScheme(url)).path
 
                     // processedUrl == null means that the preMap won't be continued to map
                     return if (processedUrl != null) {
-                        routeUrl(context, url, processedUrl, interceptor, args)
+                        routeUrl(context, url, processedUrl, interceptor, args, it.pattern)
                     } else {
                         Log.i(TAG, "Routing url " + url + " using " + it.pattern)
                         true
@@ -155,18 +202,23 @@ class Router {
      * @param url          URL
      * @param processedUrl Processed sub URL from preMap
      * @param args         Optional arguments
+     * @param parentPattern Scheme and host Expression
      * @return Has routing path
      */
     private fun routeUrl(context: Context,
                          url: String,
                          processedUrl: String,
                          interceptor: Interceptor?,
-                         args: Bundle?): Boolean {
+                         args: Bundle?,
+                         parentPattern: String? = null): Boolean {
+
+        var processorFiltered = processors.filter { it.parentPattern.equals(parentPattern) }
 
         // Do sorting first
-        processors = processors.sortedWith(generateComparator())
+        processorFiltered = processorFiltered.sortedWith(generateComparator())
 
-        processors.forEach {
+
+        processorFiltered.forEach {
             val rawResult = RawResult()
 
             // Check the map matching
@@ -199,11 +251,16 @@ class Router {
     private fun <P> generateComparator(): Comparator<Expression<P>> = Comparator({ expression1, expression2 ->
 
         // Replace all variable into * first
-        val expr1 = expression1.pattern.replace(VARIABLE_REGEX.toRegex(), "*")
-        val expr2 = expression2.pattern.replace(VARIABLE_REGEX.toRegex(), "*")
+        val pattern1 = expression1.pattern.replace(VARIABLE_REGEX.toRegex(), "*")
+        val pattern2 = expression2.pattern.replace(VARIABLE_REGEX.toRegex(), "*")
 
-        // Return which is the longest expression
-        expr2.length - expr1.length
+        // Pattern length priority #1
+        val patternLength = pattern2.length - pattern1.length
+
+        // Member count priority #2
+        val memberCount = expression1.memberCount - expression2.memberCount
+
+        if (patternLength == 0) memberCount else patternLength
     })
 
     /**
@@ -256,7 +313,7 @@ class Router {
                 rawResult.variables.put(name, bodyMatcher.group(index + 1))
             }
 
-            val uri = Uri.parse(url)
+            val uri = Uri.parse(getUrlWithScheme(url))
 
             // Parse the fragment
             rawResult.fragment = uri.fragment
@@ -277,6 +334,17 @@ class Router {
             }
             true
         } else false
+    }
+
+    /**
+     * add scheme https://
+     */
+    private fun getUrlWithScheme(url: String): String {
+        return if (!Pattern.matches("\\w+://.+", url)) {
+            "https://$url"
+        } else {
+            url
+        }
     }
 
     /**
@@ -324,10 +392,10 @@ class Router {
          * @return Router instance
          */
         val INSTANCE: Router
-            get() {
-                val r = router ?: Router()
-                router = r
-                return r
+            get() = router ?: let {
+                val temp = Router()
+                router = temp
+                temp
             }
     }
 }

@@ -9,13 +9,13 @@ import android.os.Bundle
 
 class Result(val context: Context,
              val url: String,
-             val variables: ParamMap,
-             val queries: ParamsMap,
+             val variables: OptParamMap,
+             val queries: OptParamsMap,
              val fragment: String?,
              val args: Bundle?)
 
-class RawResult(val variables: ParamMap = ParamMap(),
-                val queries: ParamsMap = ParamsMap(),
+class RawResult(val variables: OptParamMap = OptParamMap(),
+                val queries: OptParamsMap = OptParamsMap(),
                 var fragment: String? = null) {
 
     fun cook(context: Context,
